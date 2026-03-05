@@ -1,6 +1,6 @@
 use anyhow::Result;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tauri::Manager;
@@ -35,13 +35,6 @@ fn is_accessibility_trusted() -> bool {
     }
 }
 
-/// Wrapper to allow Enigo to be shared across threads via Arc<Mutex<>>.
-/// On macOS, Enigo contains CGEventSource (a NonNull pointer) which is not Send/Sync.
-/// Safety: We only access Enigo through a Mutex, ensuring exclusive access.
-struct SendSyncEnigo(Enigo);
-unsafe impl Send for SendSyncEnigo {}
-unsafe impl Sync for SendSyncEnigo {}
-
 /// Delay before capturing selected text to ensure hotkey modifiers are released.
 const SELECTED_TEXT_CAPTURE_DELAY_MS: u64 = 60;
 /// Delay after simulating Ctrl+C to let the clipboard update.
@@ -50,8 +43,6 @@ const CLIPBOARD_COPY_SETTLE_MS: u64 = 100;
 const VOLUME_POLL_INTERVAL_MS: u64 = 50;
 /// Timeout for STT finalization after recording stops.
 const STT_FINALIZE_TIMEOUT_SECS: u64 = 120;
-/// Delay between streaming paste operations (keyboard mode).
-const STREAM_PASTE_DELAY_MS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -527,15 +518,11 @@ impl PipelineHandle {
             .unwrap_or_else(|e| e.into_inner())
             .take();
 
-        let is_keyboard = config.output_mode == "keyboard";
-        let mut is_keyboard_streaming = is_keyboard;
-
-        // On macOS, all keyboard/clipboard output requires Accessibility permission.
-        // Check early so we can fall through to batch output_text() which also checks
-        // and surfaces a clear user-facing error instead of silently dropping events.
-        if is_keyboard && !is_accessibility_trusted() {
-            is_keyboard_streaming = false;
-        }
+        // Always use batch output: keyboard mode uses output_text() after full LLM
+        // response arrives. Streaming chunk-by-chunk clipboard paste was unreliable
+        // on Windows — each Ctrl+V is async and the next set_text() could overwrite
+        // the clipboard before the target app processed the previous paste, producing
+        // garbled output that differed from what History recorded.
 
         // Pre-build LLM provider and Enigo while STT is still processing
         let pre_llm = if config.polish_enabled
@@ -560,20 +547,7 @@ impl PipelineHandle {
                 temperature: 0.3,
             };
             let provider = llm::create_provider(&config.llm_provider, Some(self.shared_client.clone()));
-            let enigo_result = if is_keyboard_streaming {
-                Some(Enigo::new(&EnigoSettings::default()).map(SendSyncEnigo))
-            } else {
-                None
-            };
-            // Pre-build clipboard once alongside Enigo to avoid re-opening the system
-            // clipboard on every streaming chunk (Windows: OpenClipboard is exclusive,
-            // high-frequency re-creation causes lock contention and silent chunk drops).
-            let clipboard_result = if is_keyboard_streaming {
-                Some(arboard::Clipboard::new())
-            } else {
-                None
-            };
-            Some((llm_config, provider, enigo_result, clipboard_result))
+            Some((llm_config, provider))
         } else {
             None
         };
@@ -615,82 +589,16 @@ impl PipelineHandle {
         let llm_elapsed;
 
         // Polish with LLM (resources already pre-built)
-        if let Some((llm_config, provider, enigo_result, clipboard_result)) = pre_llm {
+        if let Some((llm_config, provider)) = pre_llm {
             self.set_state(PipelineState::Polishing);
             let llm_start = std::time::Instant::now();
 
-            let on_chunk: llm::ChunkCallback = if is_keyboard_streaming {
-                match enigo_result.expect("enigo_result should be Some when is_keyboard_streaming is true") {
-                    Ok(enigo_instance) => {
-                        let enigo = Arc::new(Mutex::new(enigo_instance));
-                        // Reuse the pre-built clipboard instance; fall back to per-chunk
-                        // creation only if pre-build failed (e.g. clipboard daemon not running).
-                        let clipboard = clipboard_result
-                            .expect("clipboard_result should be Some when is_keyboard_streaming is true")
-                            .ok()
-                            .map(|cb| Arc::new(Mutex::new(cb)));
-                        let app_handle = self.app_handle.clone();
-                        let state = self.state.clone();
-                        let transitioned = Arc::new(AtomicBool::new(false));
-                        Box::new(move |chunk: &str| {
-                            // Transition to Outputting on first chunk
-                            if !transitioned.swap(true, Ordering::Relaxed) {
-                                state.store(PipelineState::Outputting.as_u8(), Ordering::SeqCst);
-                                let _ =
-                                    app_handle.emit("pipeline:state", PipelineState::Outputting);
-                            }
-                            let _ = app_handle.emit("llm:chunk", chunk);
-                            // Paste each chunk via clipboard to avoid dropped CJK characters
-                            // that occur with enigo's SendInput-based text() on Windows.
-                            // Use the pre-built clipboard to avoid re-opening the system
-                            // clipboard handle on every chunk (prevents lock contention on Windows).
-                            let pasted = if let Some(ref cb_arc) = clipboard {
-                                if let Ok(mut cb) = cb_arc.lock() {
-                                    cb.set_text(chunk).is_ok()
-                                } else {
-                                    false
-                                }
-                            } else {
-                                // Pre-build failed; fall back to per-chunk creation
-                                arboard::Clipboard::new()
-                                    .map(|mut cb| cb.set_text(chunk).is_ok())
-                                    .unwrap_or(false)
-                            };
-                            if pasted {
-                                if let Ok(mut e) = enigo.lock() {
-                                    #[cfg(target_os = "macos")]
-                                    let modifier = Key::Meta;
-                                    #[cfg(not(target_os = "macos"))]
-                                    let modifier = Key::Control;
-                                    let _ = e.0.key(modifier, Direction::Press);
-                                    let _ = e.0.key(Key::Unicode('v'), Direction::Click);
-                                    let _ = e.0.key(modifier, Direction::Release);
-                                    // Use block_in_place so tokio knows this thread is
-                                    // blocking; prevents starving the async executor.
-                                    tokio::task::block_in_place(|| {
-                                        std::thread::sleep(std::time::Duration::from_millis(
-                                            STREAM_PASTE_DELAY_MS,
-                                        ))
-                                    });
-                                }
-                            }
-                        })
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create Enigo for streaming: {:?}, falling back to batch output", e);
-                        is_keyboard_streaming = false;
-                        let app_handle = self.app_handle.clone();
-                        Box::new(move |chunk: &str| {
-                            let _ = app_handle.emit("llm:chunk", chunk);
-                        })
-                    }
-                }
-            } else {
-                let app_handle = self.app_handle.clone();
-                Box::new(move |chunk: &str| {
-                    let _ = app_handle.emit("llm:chunk", chunk);
-                })
-            };
+            // on_chunk only drives the UI transcript display; actual output happens
+            // in batch after the full response arrives (see output_text below).
+            let app_handle = self.app_handle.clone();
+            let on_chunk: llm::ChunkCallback = Box::new(move |chunk: &str| {
+                let _ = app_handle.emit("llm:chunk", chunk);
+            });
 
             let req = PolishRequest {
                 raw_text: raw_text.clone(),
@@ -706,11 +614,7 @@ impl PipelineHandle {
                     final_text = response.polished_text;
                     llm_elapsed = llm_start.elapsed();
 
-                    if is_keyboard_streaming {
-                        let _ = self
-                            .app_handle
-                            .emit("pipeline:target_app", &app_ctx.app_name);
-                    } else if let Err(e) = self
+                    if let Err(e) = self
                         .output_text(&final_text, &app_ctx.app_name, &config)
                         .await
                     {
@@ -725,30 +629,17 @@ impl PipelineHandle {
                     final_text = raw_text.clone();
                     llm_elapsed = llm_start.elapsed();
 
-                    if is_keyboard_streaming {
-                        tracing::warn!("LLM failed mid-stream in keyboard mode, partial text may already be typed");
-                        let _ = self.app_handle.emit(
-                            "pipeline:error",
-                            format!("LLM polishing failed mid-stream: {e}"),
-                        );
-                        // raw_text is NOT output here because partial polished text has
-                        // already been typed — appending raw_text would produce garbled output.
+                    let _ = self
+                        .app_handle
+                        .emit("pipeline:error", format!("LLM polishing failed: {e}"));
+                    if let Err(e) = self
+                        .output_text(&final_text, &app_ctx.app_name, &config)
+                        .await
+                    {
+                        tracing::error!("Output failed: {}", e);
                         let _ = self
                             .app_handle
-                            .emit("pipeline:target_app", &app_ctx.app_name);
-                    } else {
-                        let _ = self
-                            .app_handle
-                            .emit("pipeline:error", format!("LLM polishing failed: {e}"));
-                        if let Err(e) = self
-                            .output_text(&final_text, &app_ctx.app_name, &config)
-                            .await
-                        {
-                            tracing::error!("Output failed: {}", e);
-                            let _ = self
-                                .app_handle
-                                .emit("pipeline:error", format!("Output failed: {e}"));
-                        }
+                            .emit("pipeline:error", format!("Output failed: {e}"));
                     }
                 }
             }
