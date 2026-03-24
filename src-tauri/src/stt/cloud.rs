@@ -13,7 +13,7 @@ pub struct CloudSttProvider {
     api_base_url: String,
 }
 
-/// Max audio buffer: ~24 MB PCM ≈ 12.5 min at 16kHz 16-bit mono.
+/// Max audio buffer: ~24 MB PCM ≈ 13 min at 16kHz 16-bit mono.
 const MAX_AUDIO_BYTES: usize = 24 * 1024 * 1024;
 
 impl CloudSttProvider {
@@ -50,7 +50,7 @@ impl SttProvider for CloudSttProvider {
 
     async fn send_audio(&mut self, chunk: &[u8]) -> Result<()> {
         if self.audio_buffer.len() + chunk.len() > MAX_AUDIO_BYTES {
-            anyhow::bail!("Cloud STT: audio exceeds maximum length (~12 min)");
+            anyhow::bail!("Cloud STT: audio exceeds maximum length (~13 min)");
         }
         self.audio_buffer.extend_from_slice(chunk);
         Ok(())

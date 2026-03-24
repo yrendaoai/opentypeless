@@ -23,11 +23,20 @@ describe('request() via getSubscriptionStatus', () => {
         json: () =>
           Promise.resolve({
             plan: 'pro',
-            subscriptionEnd: '2025-12-31',
-            sttSecondsUsed: 100,
-            sttSecondsLimit: 36000,
-            llmTokensUsed: 5000,
-            llmTokensLimit: 5000000,
+            subscription: {
+              id: 'sub_123',
+              status: 'active',
+              currentPeriodEnd: '2025-12-31',
+              cancelAtPeriodEnd: false,
+            },
+            quota: {
+              stt: { used: 100, limit: 36000, unit: 'seconds' },
+              polish: { used: 5000, limit: 5000000, unit: 'tokens' },
+              agent: { used: 1000, limit: 20000000, unit: 'tokens' },
+              trial: { used: 0, limit: 0, unit: 'tokens' },
+              free: { used: 500, unit: 'tokens' },
+              search: { used: 10, limit: 800, unit: 'requests' },
+            },
           }),
       }),
     )
@@ -50,11 +59,13 @@ describe('request() via getSubscriptionStatus', () => {
     )
   })
 
-  it('returns parsed JSON on success', async () => {
+  it('returns parsed JSON with transformed quota fields', async () => {
     const { getSubscriptionStatus } = await import('../api')
     const result = await getSubscriptionStatus()
     expect(result.plan).toBe('pro')
     expect(result.sttSecondsLimit).toBe(36000)
+    expect(result.polishTokensLimit).toBe(5000000)
+    expect(result.agentTokensLimit).toBe(20000000)
   })
 })
 
@@ -110,13 +121,13 @@ describe('createCheckout', () => {
     )
 
     const { createCheckout } = await import('../api')
-    const result = await createCheckout('web')
+    const result = await createCheckout({ plan: 'plus', interval: 'monthly', origin: 'web' })
 
     expect(fetch).toHaveBeenCalledWith(
-      `${API_BASE}/api/checkout/create`,
+      `${API_BASE}/api/stripe/checkout`,
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ origin: 'web' }),
+        body: JSON.stringify({ plan: 'plus', interval: 'monthly', origin: 'web' }),
       }),
     )
     expect(result.url).toBe('https://checkout.stripe.com/xxx')
@@ -139,13 +150,13 @@ describe('proxyLlm', () => {
 
     const { proxyLlm } = await import('../api')
     const messages = [{ role: 'user', content: 'hello' }]
-    const result = await proxyLlm(messages)
+    const result = await proxyLlm({ messages })
 
     expect(fetch).toHaveBeenCalledWith(
       `${API_BASE}/api/proxy/llm`,
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify({ messages, model: undefined, type: 'polish', stream: false }),
       }),
     )
     expect(result.text).toBe('polished text')

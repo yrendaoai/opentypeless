@@ -2,10 +2,11 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { authClient } from '../lib/auth-client'
 import { getSubscriptionStatus } from '../lib/api'
-import { toast } from '../components/Toast'
+import { toast } from '../lib/toast'
 
 let sttWarningShown = false
 let llmWarningShown = false
+let agentWarningShown = false
 
 export interface AuthUser {
   id: string
@@ -16,14 +17,22 @@ export interface AuthUser {
 interface AuthState {
   // User
   user: AuthUser | null
-  plan: 'free' | 'pro'
+  plan: 'free' | 'plus' | 'pro'
   subscriptionEnd: string | null
+  cancelAtPeriodEnd: boolean
+  cloudAuthState: 'ready' | 'cloud_auth_incomplete'
 
   // Quotas
   sttSecondsUsed: number
   sttSecondsLimit: number
-  llmTokensUsed: number
-  llmTokensLimit: number
+  polishTokensUsed: number
+  polishTokensLimit: number
+  agentTokensUsed: number
+  agentTokensLimit: number
+  trialTokensUsed: number
+  trialTokensLimit: number
+  searchRequestsUsed: number
+  searchRequestsLimit: number
 
   // Loading
   loading: boolean
@@ -48,10 +57,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   plan: 'free',
   subscriptionEnd: null,
+  cancelAtPeriodEnd: false,
+  cloudAuthState: 'ready',
   sttSecondsUsed: 0,
   sttSecondsLimit: 0,
-  llmTokensUsed: 0,
-  llmTokensLimit: 0,
+  polishTokensUsed: 0,
+  polishTokensLimit: 0,
+  agentTokensUsed: 0,
+  agentTokensLimit: 0,
+  trialTokensUsed: 0,
+  trialTokensLimit: 0,
+  searchRequestsUsed: 0,
+  searchRequestsLimit: 0,
   loading: false,
   error: null,
   emailVerificationPending: false,
@@ -63,15 +80,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ loading: true, error: null })
       const { data: session } = await authClient.getSession()
       if (session?.user) {
+        const savedToken = localStorage.getItem('session_token')?.trim() || ''
         set({
           user: {
             id: session.user.id,
             email: session.user.email,
             name: session.user.name ?? null,
           },
+          cloudAuthState: savedToken ? 'ready' : 'cloud_auth_incomplete',
         })
         // Push saved session token to Rust for cloud providers
-        const savedToken = localStorage.getItem('session_token')
         if (savedToken) {
           await invoke('set_session_token', { token: savedToken }).catch((e) => {
             console.error('Failed to sync session token to backend:', e)
@@ -99,6 +117,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await invoke('set_session_token', { token }).catch((e: unknown) => {
                 console.error('Failed to sync session token to backend:', e)
               })
+              set({ cloudAuthState: 'ready' })
             }
           },
         },
@@ -111,12 +130,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         throw new Error(error.message ?? 'Sign in failed')
       }
       if (data?.user) {
+        const savedToken = localStorage.getItem('session_token')?.trim() || ''
         set({
           user: {
             id: data.user.id,
             email: data.user.email,
             name: data.user.name ?? null,
           },
+          cloudAuthState: savedToken ? 'ready' : 'cloud_auth_incomplete',
         })
         await get().refreshSubscription()
       }
@@ -142,6 +163,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               await invoke('set_session_token', { token }).catch((e: unknown) => {
                 console.error('Failed to sync session token to backend:', e)
               })
+              set({ cloudAuthState: 'ready' })
             }
           },
         },
@@ -186,17 +208,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         user: null,
         plan: 'free',
         subscriptionEnd: null,
+        cancelAtPeriodEnd: false,
         sttSecondsUsed: 0,
         sttSecondsLimit: 0,
-        llmTokensUsed: 0,
-        llmTokensLimit: 0,
+        polishTokensUsed: 0,
+        polishTokensLimit: 0,
+        agentTokensUsed: 0,
+        agentTokensLimit: 0,
+        trialTokensUsed: 0,
+        trialTokensLimit: 0,
+        searchRequestsUsed: 0,
+        searchRequestsLimit: 0,
         error: null,
         emailVerificationPending: false,
         pendingEmail: null,
         checkoutPending: false,
+        cloudAuthState: 'ready',
       })
       sttWarningShown = false
       llmWarningShown = false
+      agentWarningShown = false
     }
   },
 
@@ -206,10 +237,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({
         plan: status.plan,
         subscriptionEnd: status.subscriptionEnd,
+        cancelAtPeriodEnd: status.cancelAtPeriodEnd,
         sttSecondsUsed: status.sttSecondsUsed,
         sttSecondsLimit: status.sttSecondsLimit,
-        llmTokensUsed: status.llmTokensUsed,
-        llmTokensLimit: status.llmTokensLimit,
+        polishTokensUsed: status.polishTokensUsed,
+        polishTokensLimit: status.polishTokensLimit,
+        agentTokensUsed: status.agentTokensUsed,
+        agentTokensLimit: status.agentTokensLimit,
+        trialTokensUsed: status.trialTokensUsed,
+        trialTokensLimit: status.trialTokensLimit,
+        searchRequestsUsed: status.searchRequestsUsed,
+        searchRequestsLimit: status.searchRequestsLimit,
       })
       // Clear checkout pending flag after first post-checkout refresh
       if (get().checkoutPending) {
@@ -220,16 +258,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         status.sttSecondsUsed / status.sttSecondsLimit >= 0.9 &&
         !sttWarningShown
       ) {
-        toast('STT quota is above 90%. Consider switching to BYOK mode.', 'error')
+        toast('STT quota is above 90%. Consider upgrading your plan.', 'error')
         sttWarningShown = true
       }
       if (
-        status.llmTokensLimit > 0 &&
-        status.llmTokensUsed / status.llmTokensLimit >= 0.9 &&
+        status.polishTokensLimit > 0 &&
+        status.polishTokensUsed / status.polishTokensLimit >= 0.9 &&
         !llmWarningShown
       ) {
-        toast('LLM quota is above 90%. Consider switching to BYOK mode.', 'error')
+        toast('Polish quota is above 90%. Consider upgrading your plan.', 'error')
         llmWarningShown = true
+      }
+      if (
+        status.agentTokensLimit > 0 &&
+        status.agentTokensUsed / status.agentTokensLimit >= 0.9 &&
+        !agentWarningShown
+      ) {
+        toast('Agent quota is above 90%. Consider upgrading your plan.', 'error')
+        agentWarningShown = true
       }
     } catch (e) {
       console.warn('Failed to refresh subscription status:', e instanceof Error ? e.message : e)
@@ -243,6 +289,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       await invoke('set_session_token', { token }).catch((e: unknown) => {
         console.error('Failed to sync session token to backend:', e)
       })
+      set({ cloudAuthState: 'ready' })
       const { data: session } = await authClient.getSession({
         fetchOptions: {
           headers: { Authorization: `Bearer ${token}` },

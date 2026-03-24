@@ -151,7 +151,7 @@ function AuthForm() {
         <div
           className="rounded-[20px] p-8 space-y-5"
           style={{
-            background: 'var(--bg-elevated)',
+            background: 'var(--color-bg-elevated)',
             boxShadow: `
               0 4px 20px rgba(0,0,0,0.07),
               0 10px 40px rgba(0,0,0,0.03),
@@ -165,7 +165,7 @@ function AuthForm() {
             <div
               className="w-12 h-12 rounded-[14px] flex items-center justify-center animate-[jelly-breathe_2s_ease-in-out_infinite]"
               style={{
-                background: 'var(--bg-secondary)',
+                background: 'var(--color-bg-secondary)',
                 boxShadow: 'inset 0 1px 3px rgba(255,255,255,0.6), inset 0 -1px 3px rgba(0,0,0,0.04)',
               }}
             >
@@ -197,7 +197,7 @@ function AuthForm() {
           <div className="h-1 rounded-full overflow-hidden bg-bg-secondary mx-8">
             <div
               className="h-full rounded-full animate-[shimmer-sweep_1.5s_ease-in-out_infinite]"
-              style={{ background: 'linear-gradient(90deg, transparent, var(--accent), transparent)', width: '40%' }}
+              style={{ background: 'linear-gradient(90deg, transparent, var(--color-accent), transparent)', width: '40%' }}
             />
           </div>
 
@@ -342,8 +342,10 @@ function AccountDetails() {
     subscriptionEnd,
     sttSecondsUsed,
     sttSecondsLimit,
-    llmTokensUsed,
-    llmTokensLimit,
+    polishTokensUsed,
+    polishTokensLimit,
+    agentTokensUsed,
+    agentTokensLimit,
     signOut,
   } = useAuthStore()
   const config = useAppStore((s) => s.config)
@@ -357,14 +359,44 @@ function AccountDetails() {
   const [backupMsg, setBackupMsg] = useState<string | null>(null)
   const [portalLoading, setPortalLoading] = useState(false)
 
-  const isPro = plan === 'pro'
+  const isPaid = plan === 'plus' || plan === 'pro'
 
   const handleBackup = async () => {
     setBackupLoading(true)
     setBackupMsg(null)
     try {
-      const { stt_api_key, llm_api_key, ...safeConfig } = config
-      await uploadBackup({ history, dictionary, settings: safeConfig })
+      // Whitelist only safe, non-sensitive settings for cloud backup
+      // Explicitly exclude: stt_configs, llm_configs, agent_llm_configs, canvas_tavily_api_key, etc.
+      const safeSettings = {
+        stt_provider: config.stt_provider,
+        llm_provider: config.llm_provider,
+        agent_llm_provider: config.agent_llm_provider,
+        canvas_llm_provider: config.canvas_llm_provider,
+        stt_language: config.stt_language,
+        polish_enabled: config.polish_enabled,
+        translate_enabled: config.translate_enabled,
+        target_lang: config.target_lang,
+        hotkey: config.hotkey,
+        hotkey_mode: config.hotkey_mode,
+        output_mode: config.output_mode,
+        selected_text_enabled: config.selected_text_enabled,
+        theme: config.theme,
+        auto_start: config.auto_start,
+        close_to_tray: config.close_to_tray,
+        start_minimized: config.start_minimized,
+        max_recording_seconds: config.max_recording_seconds,
+        ui_language: config.ui_language,
+        agent_workspace_root: config.agent_workspace_root,
+        hotkey_profile_version: config.hotkey_profile_version,
+        canvas_enabled: config.canvas_enabled,
+        canvas_hotkey: config.canvas_hotkey,
+        canvas_auto_close_delay: config.canvas_auto_close_delay,
+        canvas_search_enabled: config.canvas_search_enabled,
+        chat_v2_enabled: config.chat_v2_enabled,
+        agent_only_mode: config.agent_only_mode,
+        prompt_mode: config.prompt_mode,
+      }
+      await uploadBackup({ history, dictionary, settings: safeSettings })
       setBackupMsg('Backup uploaded successfully')
     } catch (e) {
       setBackupMsg(e instanceof Error ? e.message : 'Backup failed')
@@ -411,8 +443,8 @@ function AccountDetails() {
       <div className="border border-border rounded-[10px] overflow-hidden">
         <InfoRow label={t('account.email')} value={user!.email} />
         {user!.name && <InfoRow label={t('account.name')} value={user!.name} />}
-        <InfoRow label={t('account.plan')} value={isPro ? t('upgrade.pro') : t('upgrade.free')} />
-        {isPro && subscriptionEnd && (
+        <InfoRow label={t('account.plan')} value={plan === 'pro' ? t('upgrade.pro') : plan === 'plus' ? t('upgrade.plus', 'Plus') : t('upgrade.free')} />
+        {isPaid && subscriptionEnd && (
           <InfoRow
             label={t('account.renews')}
             value={new Date(subscriptionEnd).toLocaleDateString()}
@@ -421,11 +453,11 @@ function AccountDetails() {
       </div>
 
       {/* Quota */}
-      {sttSecondsLimit > 0 && (
+      {(sttSecondsLimit > 0 || polishTokensLimit > 0 || agentTokensLimit > 0) && (
         <div className="border border-border rounded-[10px] overflow-hidden">
           <div className="px-3 py-2.5 bg-bg-secondary/50 border-b border-border">
             <h3 className="text-[13px] font-medium text-text-primary">
-              {isPro ? t('account.usageThisMonth') : t('account.freeCredit', 'Free Credit')}
+              {isPaid ? t('account.usageThisMonth') : t('account.freeCredit', 'Free Credit')}
             </h3>
           </div>
           <div className="px-3 py-3 space-y-3">
@@ -438,17 +470,24 @@ function AccountDetails() {
             />
             <QuotaBar
               label={t('upgrade.llm')}
-              used={llmTokensUsed}
-              limit={llmTokensLimit}
-              unit="k tokens"
+              used={polishTokensUsed}
+              limit={polishTokensLimit}
+              unit="tokens"
+              divisor={1000}
+            />
+            <QuotaBar
+              label="Agent"
+              used={agentTokensUsed}
+              limit={agentTokensLimit}
+              unit="tokens"
               divisor={1000}
             />
           </div>
         </div>
       )}
 
-      {/* Cloud backup (Pro) */}
-      {isPro && (
+      {/* Cloud backup (Plus/Pro) */}
+      {isPaid && (
         <div className="border border-border rounded-[10px] overflow-hidden">
           <div className="px-3 py-2.5 bg-bg-secondary/50 border-b border-border">
             <h3 className="text-[13px] font-medium text-text-primary">
@@ -484,8 +523,8 @@ function AccountDetails() {
         </div>
       )}
 
-      {/* Manage subscription (Pro) */}
-      {isPro && (
+      {/* Manage subscription (Plus/Pro) */}
+      {isPaid && (
         <button
           onClick={handleManageSubscription}
           disabled={portalLoading}
@@ -535,8 +574,21 @@ function QuotaBar({
   divisor: number
 }) {
   const pct = limit > 0 ? Math.min((used / limit) * 100, 100) : 0
-  const usedDisplay = (used / divisor).toFixed(1)
-  const limitDisplay = (limit / divisor).toFixed(1)
+
+  // Format numbers with appropriate suffix
+  const formatValue = (val: number): string => {
+    const display = val / divisor
+    if (divisor === 1_000_000 && display >= 1) {
+      return `${display.toFixed(1)}M`
+    }
+    if (divisor === 1000 && display >= 1) {
+      return `${display.toFixed(1)}k`
+    }
+    return display.toFixed(1)
+  }
+
+  const usedDisplay = formatValue(used)
+  const limitDisplay = formatValue(limit)
 
   return (
     <div className="space-y-1">

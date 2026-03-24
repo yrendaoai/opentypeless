@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useAuthStore } from '../authStore'
 
 // Mock external dependencies
@@ -40,8 +40,10 @@ describe('authStore', () => {
       subscriptionEnd: null,
       sttSecondsUsed: 0,
       sttSecondsLimit: 0,
-      llmTokensUsed: 0,
-      llmTokensLimit: 0,
+      polishTokensUsed: 0,
+      polishTokensLimit: 0,
+      agentTokensUsed: 0,
+      agentTokensLimit: 0,
       loading: false,
       error: null,
     })
@@ -53,10 +55,17 @@ describe('authStore', () => {
     vi.mocked(getSubscriptionStatus).mockResolvedValue({
       plan: 'pro',
       subscriptionEnd: '2025-12-31',
+      cancelAtPeriodEnd: false,
       sttSecondsUsed: 100,
       sttSecondsLimit: 36000,
-      llmTokensUsed: 5000,
-      llmTokensLimit: 5000000,
+      polishTokensUsed: 5000,
+      polishTokensLimit: 5000000,
+      agentTokensUsed: 12000,
+      agentTokensLimit: 200000,
+      trialTokensUsed: 0,
+      trialTokensLimit: 0,
+      searchRequestsUsed: 0,
+      searchRequestsLimit: 800,
     })
   })
 
@@ -77,8 +86,10 @@ describe('authStore', () => {
         subscriptionEnd: '2025-12-31',
         sttSecondsUsed: 100,
         sttSecondsLimit: 36000,
-        llmTokensUsed: 5000,
-        llmTokensLimit: 5000000,
+        polishTokensUsed: 5000,
+        polishTokensLimit: 5000000,
+        agentTokensUsed: 12000,
+        agentTokensLimit: 200000,
       })
 
       await getState().signOut()
@@ -87,7 +98,8 @@ describe('authStore', () => {
       expect(getState().plan).toBe('free')
       expect(getState().subscriptionEnd).toBeNull()
       expect(getState().sttSecondsUsed).toBe(0)
-      expect(getState().llmTokensUsed).toBe(0)
+      expect(getState().polishTokensUsed).toBe(0)
+      expect(getState().agentTokensUsed).toBe(0)
     })
   })
 
@@ -103,8 +115,10 @@ describe('authStore', () => {
       expect(getState().subscriptionEnd).toBe('2025-12-31')
       expect(getState().sttSecondsUsed).toBe(100)
       expect(getState().sttSecondsLimit).toBe(36000)
-      expect(getState().llmTokensUsed).toBe(5000)
-      expect(getState().llmTokensLimit).toBe(5000000)
+      expect(getState().polishTokensUsed).toBe(5000)
+      expect(getState().polishTokensLimit).toBe(5000000)
+      expect(getState().agentTokensUsed).toBe(12000)
+      expect(getState().agentTokensLimit).toBe(200000)
     })
   })
 
