@@ -46,7 +46,7 @@ jobs:
 
       - run: npm ci
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc97ebc # stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
@@ -78,7 +78,7 @@ jobs:
       - run: npm audit --audit-level=high
         continue-on-error: true
 
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc97ebc # stable
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
         run: cargo install cargo-audit

@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Cloud, Key, Mic, Bot, Sparkles, Infinity, Layers } from 'lucide-react'
+import { Cloud, Key, Mic, Bot, Sparkles, Infinity as InfinityIcon, Layers } from 'lucide-react'
 import { useAppStore } from '../../stores/appStore'
 import { spring } from '../../lib/animations'
 
@@ -66,7 +66,7 @@ export function ModeSelectStep() {
             <span className="text-[14px] font-medium text-text-primary">Bring Your Own Key</span>
             <p className="text-[13px] text-text-secondary">Use your own API keys</p>
             <div className="flex flex-col gap-0.5">
-              <Detail icon={Infinity} text="Unlimited usage" />
+              <Detail icon={InfinityIcon} text="Unlimited usage" />
               <Detail icon={Layers} text="12+ providers supported" />
             </div>
           </div>
