@@ -727,22 +727,21 @@ impl PipelineHandle {
     ) -> Result<()> {
         self.set_state(PipelineState::Outputting);
 
-        // On macOS, keyboard and clipboard-paste output both rely on CGEventPost
-        // (enigo). Without Accessibility permission the OS silently drops all
-        // synthetic events. Detect early and surface a clear error instead.
-        if !is_accessibility_trusted() {
-            anyhow::bail!(
-                "Accessibility permission is required to type text. \
-                 Please go to System Settings → Privacy & Security → Accessibility \
-                 and enable OpenTypeless."
-            );
-        }
-
         let mode = if config.output_mode == "keyboard" {
             OutputMode::Keyboard
         } else {
             OutputMode::Clipboard
         };
+
+        // On macOS, keyboard output uses CGEventPost via enigo which requires
+        // Accessibility permission. Clipboard mode uses osascript which does not.
+        if mode == OutputMode::Keyboard && !is_accessibility_trusted() {
+            anyhow::bail!(
+                "Accessibility permission is required for keyboard output. \
+                 Please go to System Settings → Privacy & Security → Accessibility \
+                 and enable OpenTypeless."
+            );
+        }
 
         let output = output::create_output(mode);
         output.type_text(text).await?;
