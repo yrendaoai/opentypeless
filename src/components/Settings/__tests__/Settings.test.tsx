@@ -61,12 +61,16 @@ vi.mock('framer-motion', () => ({
 }))
 
 // ─── Mock react-i18next ───────────────────────────────────────────────────────
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-    i18n: { language: 'en' },
-  }),
-}))
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>()
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (key: string) => key,
+      i18n: { language: 'en', changeLanguage: vi.fn() },
+    }),
+  }
+})
 
 // ─── Mock Tauri plugins / lib/tauri ──────────────────────────────────────────
 vi.mock('../../../lib/tauri', () => ({
