@@ -20,7 +20,7 @@ use crate::SessionTokenStore;
 /// permission. enigo uses CGEventPost under the hood, which requires this permission;
 /// without it all synthesised key events are silently dropped by the OS.
 /// Returns true on all non-macOS platforms (no permission needed).
-fn is_accessibility_trusted() -> bool {
+pub fn is_accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]
     {
         #[link(name = "ApplicationServices", kind = "framework")]
@@ -28,6 +28,70 @@ fn is_accessibility_trusted() -> bool {
             fn AXIsProcessTrusted() -> u8;
         }
         unsafe { AXIsProcessTrusted() != 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// On macOS, request Accessibility permission by showing the system authorization dialog.
+/// Uses AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt = true.
+/// Returns true if permission is already granted or on non-macOS platforms.
+pub fn request_accessibility_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            fn AXIsProcessTrustedWithOptions(options: *mut std::ffi::c_void) -> u8;
+        }
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            fn CFDictionaryCreate(
+                allocator: *mut std::ffi::c_void,
+                keys: *const *mut std::ffi::c_void,
+                values: *const *mut std::ffi::c_void,
+                num_values: isize,
+                key_callbacks: *const std::ffi::c_void,
+                value_callbacks: *const std::ffi::c_void,
+            ) -> *mut std::ffi::c_void;
+            fn CFStringCreateWithCString(
+                allocator: *mut std::ffi::c_void,
+                c_str: *const i8,
+                encoding: u32,
+            ) -> *mut std::ffi::c_void;
+            static kCFTypeDictionaryKeyCallBacks: std::ffi::c_void;
+            static kCFTypeDictionaryValueCallBacks: std::ffi::c_void;
+        }
+        // kCFBooleanTrue — we link CoreFoundation and use the known address pattern
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            static kCFBooleanTrue: *mut std::ffi::c_void;
+        }
+        // kCFStringEncodingUTF8 = 0x08000100
+        const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
+
+        unsafe {
+            let key = CFStringCreateWithCString(
+                std::ptr::null_mut(),
+                b"kAXTrustedCheckOptionPrompt\0".as_ptr() as *const i8,
+                K_CF_STRING_ENCODING_UTF8,
+            );
+            let value = kCFBooleanTrue;
+
+            let options = CFDictionaryCreate(
+                std::ptr::null_mut(),
+                &[key] as *const *mut std::ffi::c_void,
+                &[value] as *const *mut std::ffi::c_void,
+                1,
+                &kCFTypeDictionaryKeyCallBacks as *const std::ffi::c_void,
+                &kCFTypeDictionaryValueCallBacks as *const std::ffi::c_void,
+            );
+
+            let trusted = AXIsProcessTrustedWithOptions(options);
+            // options is leaked (trivial — called at most a few times)
+            trusted != 0
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -845,11 +909,7 @@ impl PipelineHandle {
         // On macOS, keyboard output uses CGEventPost via enigo which requires
         // Accessibility permission. Clipboard mode uses osascript which does not.
         if mode == OutputMode::Keyboard && !is_accessibility_trusted() {
-            anyhow::bail!(
-                "Accessibility permission is required for keyboard output. \
-                 Please go to System Settings → Privacy & Security → Accessibility \
-                 and enable OpenTypeless."
-            );
+            anyhow::bail!("ACCESSIBILITY_REQUIRED");
         }
 
         let output = output::create_output(mode);

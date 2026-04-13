@@ -135,6 +135,10 @@ interface AppState {
   pipelineError: string | null
   setPipelineError: (error: string | null) => void
 
+  // macOS Accessibility permission
+  accessibilityTrusted: boolean
+  setAccessibilityTrusted: (trusted: boolean) => void
+
   // Context menu
   contextMenuOpen: boolean
   setContextMenuOpen: (open: boolean) => void
@@ -230,6 +234,9 @@ export const useAppStore = create<AppState>((set) => ({
 
   pipelineError: null,
   setPipelineError: (pipelineError) => set({ pipelineError }),
+
+  accessibilityTrusted: true,
+  setAccessibilityTrusted: (accessibilityTrusted) => set({ accessibilityTrusted }),
 
   contextMenuOpen: false,
   setContextMenuOpen: (contextMenuOpen) => set({ contextMenuOpen }),

@@ -5,7 +5,7 @@ import { useTheme } from './hooks/useTheme'
 import { useAppStore } from './stores/appStore'
 import { useAuthStore } from './stores/authStore'
 import { useRoute } from './lib/router'
-import { loadOnboardingCompleted, getConfig, getHistory, getDictionary } from './lib/tauri'
+import { loadOnboardingCompleted, getConfig, getHistory, getDictionary, checkAccessibilityPermission } from './lib/tauri'
 import { initDeepLinkListener } from './lib/deep-link'
 import { Capsule } from './components/Capsule'
 import { Settings } from './components/Settings'
@@ -55,6 +55,7 @@ function MainApp() {
   const setSavedConfig = useAppStore((s) => s.setSavedConfig)
   const setHistory = useAppStore((s) => s.setHistory)
   const setDictionary = useAppStore((s) => s.setDictionary)
+  const setAccessibilityTrusted = useAppStore((s) => s.setAccessibilityTrusted)
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const { route } = useRoute()
@@ -73,6 +74,12 @@ function MainApp() {
           setSavedConfig(config)
           setHistory(history)
           setDictionary(dictionary)
+          // Check macOS Accessibility permission
+          if (navigator.platform.toUpperCase().indexOf('MAC') >= 0) {
+            checkAccessibilityPermission().then((trusted) => {
+              setAccessibilityTrusted(trusted)
+            })
+          }
           // Restore UI language from config
           if (config.ui_language && config.ui_language !== i18n.language) {
             i18n.changeLanguage(config.ui_language)
@@ -91,7 +98,7 @@ function MainApp() {
 
     // Initialize deep-link listener
     initDeepLinkListener()
-  }, [setOnboardingCompleted, setConfig, setSavedConfig, setHistory, setDictionary])
+  }, [setOnboardingCompleted, setConfig, setSavedConfig, setHistory, setDictionary, setAccessibilityTrusted])
 
   const user = useAuthStore((s) => s.user)
 

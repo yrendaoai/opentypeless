@@ -88,7 +88,8 @@
     "history": "历史记录",
     "account": "账户",
     "upgrade": "升级",
-    "exit": "退出"
+    "exit": "退出",
+    "accessibilityRequired": "需要辅助功能权限 — 请打开设置"
   },
   "settings": {
     "title": "设置",
@@ -145,7 +146,11 @@
     "tauriReact": "Tauri v2 + React",
     "view": "查看",
     "maxRecordingDuration": "最大录音时长",
-    "hideCapsuleWhenIdle": "空闲时隐藏胶囊"
+    "hideCapsuleWhenIdle": "空闲时隐藏胶囊",
+    "accessibilityPermission": "macOS 辅助功能",
+    "accessibilityGranted": "权限已授予",
+    "accessibilityRequired": "键盘输出需要此权限",
+    "grantPermission": "授权"
   },
   "dictionary": {
     "word": "词语",

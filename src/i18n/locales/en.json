@@ -88,7 +88,8 @@
     "history": "History",
     "account": "Account",
     "upgrade": "Upgrade",
-    "exit": "Exit"
+    "exit": "Exit",
+    "accessibilityRequired": "Accessibility needed — open Settings"
   },
   "settings": {
     "title": "Settings",
@@ -145,7 +146,11 @@
     "tauriReact": "Tauri v2 + React",
     "view": "View",
     "maxRecordingDuration": "Max Recording Duration",
-    "hideCapsuleWhenIdle": "Hide capsule when idle"
+    "hideCapsuleWhenIdle": "Hide capsule when idle",
+    "accessibilityPermission": "macOS Accessibility",
+    "accessibilityGranted": "Permission granted",
+    "accessibilityRequired": "Required for keyboard output",
+    "grantPermission": "Grant Permission"
   },
   "dictionary": {
     "word": "Word",

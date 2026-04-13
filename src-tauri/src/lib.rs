@@ -133,6 +133,16 @@ fn abort_recording(state: tauri::State<'_, pipeline::PipelineHandle>) -> Result<
 }
 
 #[tauri::command]
+fn check_accessibility_permission() -> bool {
+    pipeline::is_accessibility_trusted()
+}
+
+#[tauri::command]
+fn request_accessibility_permission() -> bool {
+    pipeline::request_accessibility_permission()
+}
+
+#[tauri::command]
 async fn get_config(
     state: tauri::State<'_, storage::ConfigManager>,
 ) -> Result<storage::AppConfig, String> {
@@ -1304,6 +1314,8 @@ pub fn run() {
             start_recording,
             stop_recording,
             abort_recording,
+            check_accessibility_permission,
+            request_accessibility_permission,
             get_config,
             update_config,
             test_stt_connection,

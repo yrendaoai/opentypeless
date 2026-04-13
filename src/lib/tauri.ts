@@ -99,6 +99,15 @@ export async function setAutoStart(enabled: boolean): Promise<void> {
   return invoke('set_auto_start', { enabled })
 }
 
+// macOS Accessibility permission
+export async function checkAccessibilityPermission(): Promise<boolean> {
+  return invoke('check_accessibility_permission')
+}
+
+export async function requestAccessibilityPermission(): Promise<boolean> {
+  return invoke('request_accessibility_permission')
+}
+
 // Onboarding persistence via tauri-plugin-store
 export async function loadOnboardingCompleted(): Promise<boolean> {
   try {
