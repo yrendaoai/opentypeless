@@ -51,6 +51,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# evdev fallback global shortcut. Handles native-Wayland focus where the X11
+# plugin sees nothing because XGrabKey only observes XWayland clients.
+# Requires the user to be in the `input` group; otherwise the listener is
+# silently skipped and the X11 plugin still covers X11 focus.
+evdev = { version = "0.12", features = ["tokio"] }
+
 [profile.release]
 codegen-units = 1
 opt-level = "s"

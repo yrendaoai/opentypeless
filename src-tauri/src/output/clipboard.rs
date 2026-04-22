@@ -51,21 +51,23 @@ impl TextOutput for ClipboardOutput {
                 }
             }
 
-            #[cfg(not(target_os = "macos"))]
+            // On Linux, prefer kernel uinput so the paste reaches native
+            // Wayland apps. If uinput is unavailable (no permission, no udev
+            // rule), fall back to enigo — which still works on X11.
+            #[cfg(target_os = "linux")]
             {
-                use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-                let mut enigo = Enigo::new(&Settings::default())
-                    .map_err(|e| anyhow::anyhow!("Failed to create Enigo: {:?}", e))?;
+                if let Err(e) = crate::uinput_output::paste() {
+                    tracing::warn!(
+                        "uinput paste unavailable ({}); falling back to enigo (X11 only)",
+                        e
+                    );
+                    enigo_paste()?;
+                }
+            }
 
-                enigo
-                    .key(Key::Control, Direction::Press)
-                    .map_err(|e| anyhow::anyhow!("Key press error: {:?}", e))?;
-                enigo
-                    .key(Key::Unicode('v'), Direction::Click)
-                    .map_err(|e| anyhow::anyhow!("Key click error: {:?}", e))?;
-                enigo
-                    .key(Key::Control, Direction::Release)
-                    .map_err(|e| anyhow::anyhow!("Key release error: {:?}", e))?;
+            #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+            {
+                enigo_paste()?;
             }
 
             Ok(())
@@ -76,4 +78,21 @@ impl TextOutput for ClipboardOutput {
     fn mode(&self) -> OutputMode {
         OutputMode::Clipboard
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn enigo_paste() -> Result<()> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    let mut enigo = Enigo::new(&Settings::default())
+        .map_err(|e| anyhow::anyhow!("Failed to create Enigo: {:?}", e))?;
+    enigo
+        .key(Key::Control, Direction::Press)
+        .map_err(|e| anyhow::anyhow!("Key press error: {:?}", e))?;
+    enigo
+        .key(Key::Unicode('v'), Direction::Click)
+        .map_err(|e| anyhow::anyhow!("Key click error: {:?}", e))?;
+    enigo
+        .key(Key::Control, Direction::Release)
+        .map_err(|e| anyhow::anyhow!("Key release error: {:?}", e))?;
+    Ok(())
 }
