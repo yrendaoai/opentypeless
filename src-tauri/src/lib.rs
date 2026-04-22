@@ -1,10 +1,14 @@
 pub mod app_detector;
 pub mod audio;
+#[cfg(target_os = "linux")]
+pub mod evdev_shortcut;
 pub mod llm;
 pub mod output;
 pub mod pipeline;
 pub mod storage;
 pub mod stt;
+#[cfg(target_os = "linux")]
+pub mod uinput_output;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -28,6 +32,33 @@ pub fn api_base_url() -> String {
 /// Cached hotkey mode to avoid loading config from disk on every keypress.
 /// Updated whenever config is saved.
 struct HotkeyModeCache(Arc<Mutex<String>>);
+
+/// Gate that filters OS key auto-repeat. On X11 (and similarly on some Wayland
+/// compositors), holding a registered shortcut synthesizes a rapid Released →
+/// Pressed sequence every ~30–500ms. Without filtering, that toggles the
+/// pipeline in toggle mode and prematurely stops recording in hold mode.
+///
+/// - `is_active` tracks the logical "key is down" state. A Pressed event that
+///   finds it already true is auto-repeat and is ignored.
+/// - `epoch` is bumped by every event. Released schedules its commit after a
+///   short debounce and cancels if `epoch` changed in the meantime (meaning a
+///   repeat Pressed arrived within the window).
+struct HotkeyGate {
+    epoch: std::sync::atomic::AtomicU64,
+    is_active: std::sync::atomic::AtomicBool,
+}
+
+/// Shared current-hotkey spec for the evdev listener (Linux). Updated from
+/// `update_hotkey`; the device tasks read it on every key event.
+#[cfg(target_os = "linux")]
+pub struct EvdevHotkeyState {
+    pub spec: evdev_shortcut::SharedSpec,
+}
+
+/// Debounce window for a Release event. Tuned to comfortably exceed the
+/// inter-event gap of X11 auto-repeat (typically 1–5ms) while staying below
+/// the shortest plausible human tap (~80ms). 40ms hits that sweet spot.
+const HOTKEY_RELEASE_DEBOUNCE_MS: u64 = 40;
 
 /// Cached close_to_tray setting to avoid blocking I/O in the window close handler.
 struct CloseToTrayCache(Arc<Mutex<bool>>);
@@ -716,6 +747,16 @@ async fn update_hotkey(
     app.global_shortcut()
         .register(new_shortcut)
         .map_err(|e| e.to_string())?;
+    reset_hotkey_gate(&app);
+
+    // Linux: also update the evdev listener's target spec so the Wayland path
+    // tracks the new binding without a restart.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(state) = app.try_state::<EvdevHotkeyState>() {
+            *state.spec.write().await = evdev_shortcut::parse(&hotkey);
+        }
+    }
 
     // Save updated hotkey to config
     let mut config = config_state.load().await.map_err(|e| e.to_string())?;
@@ -730,10 +771,19 @@ async fn update_hotkey(
 
 /// Temporarily unregister all global shortcuts so the webview can capture key events.
 #[tauri::command]
-fn pause_hotkey(app: tauri::AppHandle) -> Result<(), String> {
+async fn pause_hotkey(app: tauri::AppHandle) -> Result<(), String> {
     app.global_shortcut()
         .unregister_all()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Mute the evdev listener too; otherwise the old hotkey would still fire
+    // via /dev/input while the user is recording a new binding in Settings.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(state) = app.try_state::<EvdevHotkeyState>() {
+            *state.spec.write().await = None;
+        }
+    }
+    Ok(())
 }
 
 /// Re-register the current hotkey from config after recording is done.
@@ -748,7 +798,26 @@ async fn resume_hotkey(
     let _ = app.global_shortcut().unregister_all();
     app.global_shortcut()
         .register(shortcut)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    reset_hotkey_gate(&app);
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(state) = app.try_state::<EvdevHotkeyState>() {
+            *state.spec.write().await = evdev_shortcut::parse(&config.hotkey);
+        }
+    }
+    Ok(())
+}
+
+/// Clear the auto-repeat gate. Call after (un)registering a shortcut so a
+/// stale `is_active=true` doesn't swallow the first press of the new binding,
+/// and any in-flight Released debounce task cancels itself via the epoch.
+fn reset_hotkey_gate(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if let Some(gate) = app.try_state::<HotkeyGate>() {
+        gate.epoch.fetch_add(1, Ordering::SeqCst);
+        gate.is_active.store(false, Ordering::SeqCst);
+    }
 }
 
 // ─── Hotkey parsing ───
@@ -768,6 +837,74 @@ fn default_shortcut() -> Shortcut {
     parse_hotkey(&default_hotkey).unwrap_or(fallback)
 }
 
+/// Dispatch a shortcut edge (pressed/released) coming from either the X11
+/// plugin or the evdev listener. Both sources go through `HotkeyGate`:
+/// - auto-repeat / duplicate Pressed events are dropped (`is_active` swap)
+/// - Released is debounced so X11's release-press pair from auto-repeat
+///   collapses into a no-op, and so duplicate edges from two sources for the
+///   same physical press don't cause a spurious stop()
+pub fn dispatch_hotkey_edge(handle: tauri::AppHandle, pressed: bool) {
+    use std::sync::atomic::Ordering;
+    let gate = handle.state::<HotkeyGate>();
+
+    if pressed {
+        gate.epoch.fetch_add(1, Ordering::SeqCst);
+        if gate.is_active.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let hotkey_mode = handle
+            .state::<HotkeyModeCache>()
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        tauri::async_runtime::spawn(async move {
+            let pipeline = handle.state::<pipeline::PipelineHandle>();
+            if hotkey_mode == "toggle" {
+                if pipeline.current_state() == pipeline::PipelineState::Idle {
+                    if let Err(e) = pipeline.start().await {
+                        tracing::error!("Failed to start recording: {}", e);
+                        let _ = handle.emit("pipeline:error", e.to_string());
+                    }
+                } else if let Err(e) = pipeline.stop().await {
+                    tracing::error!("Failed to stop recording: {}", e);
+                    let _ = handle.emit("pipeline:error", e.to_string());
+                }
+            } else if let Err(e) = pipeline.start().await {
+                tracing::error!("Failed to start recording: {}", e);
+                let _ = handle.emit("pipeline:error", e.to_string());
+            }
+        });
+    } else {
+        let my_epoch = gate.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                HOTKEY_RELEASE_DEBOUNCE_MS,
+            ))
+            .await;
+            let gate = handle.state::<HotkeyGate>();
+            if gate.epoch.load(Ordering::SeqCst) != my_epoch {
+                return;
+            }
+            gate.is_active.store(false, Ordering::SeqCst);
+
+            let hotkey_mode = handle
+                .state::<HotkeyModeCache>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if hotkey_mode != "toggle" {
+                let pipeline = handle.state::<pipeline::PipelineHandle>();
+                if let Err(e) = pipeline.stop().await {
+                    tracing::error!("Failed to stop recording: {}", e);
+                    let _ = handle.emit("pipeline:error", e.to_string());
+                }
+            }
+        });
+    }
+}
+
 fn build_shortcut_handler(
     app_handle: tauri::AppHandle,
 ) -> impl Fn(&tauri::AppHandle, &Shortcut, tauri_plugin_global_shortcut::ShortcutEvent)
@@ -775,52 +912,8 @@ fn build_shortcut_handler(
        + Sync
        + 'static {
     move |_app, _shortcut, event| {
-        let handle = app_handle.clone();
-        match event.state {
-            ShortcutState::Pressed => {
-                let hotkey_mode = handle
-                    .state::<HotkeyModeCache>()
-                    .0
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                tauri::async_runtime::spawn(async move {
-                    let pipeline = handle.state::<pipeline::PipelineHandle>();
-
-                    if hotkey_mode == "toggle" {
-                        if pipeline.current_state() == pipeline::PipelineState::Idle {
-                            if let Err(e) = pipeline.start().await {
-                                tracing::error!("Failed to start recording: {}", e);
-                                let _ = handle.emit("pipeline:error", e.to_string());
-                            }
-                        } else if let Err(e) = pipeline.stop().await {
-                            tracing::error!("Failed to stop recording: {}", e);
-                            let _ = handle.emit("pipeline:error", e.to_string());
-                        }
-                    } else if let Err(e) = pipeline.start().await {
-                        tracing::error!("Failed to start recording: {}", e);
-                        let _ = handle.emit("pipeline:error", e.to_string());
-                    }
-                });
-            }
-            ShortcutState::Released => {
-                let hotkey_mode = handle
-                    .state::<HotkeyModeCache>()
-                    .0
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if hotkey_mode != "toggle" {
-                    tauri::async_runtime::spawn(async move {
-                        let pipeline = handle.state::<pipeline::PipelineHandle>();
-                        if let Err(e) = pipeline.stop().await {
-                            tracing::error!("Failed to stop recording: {}", e);
-                            let _ = handle.emit("pipeline:error", e.to_string());
-                        }
-                    });
-                }
-            }
-        }
+        let pressed = matches!(event.state, ShortcutState::Pressed);
+        dispatch_hotkey_edge(app_handle.clone(), pressed);
     }
 }
 
@@ -1094,6 +1187,10 @@ pub fn run() {
             app.manage(HotkeyModeCache(Arc::new(Mutex::new(
                 initial_config.hotkey_mode.clone(),
             ))));
+            app.manage(HotkeyGate {
+                epoch: std::sync::atomic::AtomicU64::new(0),
+                is_active: std::sync::atomic::AtomicBool::new(false),
+            });
             app.manage(CloseToTrayCache(Arc::new(Mutex::new(
                 initial_config.close_to_tray,
             ))));
@@ -1123,6 +1220,46 @@ pub fn run() {
                     "Failed to register shortcut '{}' (may be occupied): {e}",
                     initial_config.hotkey
                 );
+            }
+
+            // Linux: also listen via evdev so hotkeys work when focus is on a
+            // native Wayland app. The X11 plugin above covers XWayland focus;
+            // HotkeyGate dedupes when both paths fire for the same keypress.
+            #[cfg(target_os = "linux")]
+            {
+                let spec_shared = std::sync::Arc::new(tokio::sync::RwLock::new(
+                    evdev_shortcut::parse(&initial_config.hotkey),
+                ));
+                app.manage(EvdevHotkeyState {
+                    spec: spec_shared.clone(),
+                });
+
+                // Enumeration + stream construction must happen inside the
+                // Tokio runtime (evdev registers fds with the reactor).
+                let handle_for_edges = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let (mut rx, status) = evdev_shortcut::spawn(spec_shared);
+                    match status {
+                        evdev_shortcut::StartResult::Started => {
+                            tracing::info!("evdev shortcut listener started");
+                        }
+                        evdev_shortcut::StartResult::PermissionDenied => {
+                            let msg = "Global hotkey on Wayland needs /dev/input access. \
+                                       Run: sudo usermod -aG input $USER, then log out \
+                                       and back in. (Hotkey still works when focus is on \
+                                       an X11/XWayland app.)";
+                            tracing::warn!("{}", msg);
+                            let _ = handle_for_edges.emit("pipeline:error", msg);
+                        }
+                        evdev_shortcut::StartResult::NoDevices => {
+                            tracing::warn!("evdev: no keyboard devices found");
+                        }
+                    }
+                    while let Some(edge) = rx.recv().await {
+                        let pressed = matches!(edge, evdev_shortcut::Edge::Pressed);
+                        dispatch_hotkey_edge(handle_for_edges.clone(), pressed);
+                    }
+                });
             }
 
             // System tray
